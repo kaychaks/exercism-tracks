@@ -1,79 +1,69 @@
-use std::{collections::HashMap, sync::mpsc::channel, thread};
+use std::{cmp::min, collections::HashMap, sync::mpsc::channel, thread, vec};
 
-fn split_evenly<T>(n: usize, xs: &[T]) -> impl Iterator<Item = &[T]> {
-    struct _Iter<'a, T>(usize, &'a [T]);
-
-    impl<'a, T> Iterator for _Iter<'a, T> {
-        type Item = &'a [T];
-
-        fn next(&mut self) -> Option<Self::Item> {
-            if self.1.len() == 0 {
-                None
-            } else if self.0 == 0 {
-                Some(self.1)
+fn process(s: &str) -> Vec<(char, usize)> {
+    s.to_lowercase()
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphabetic() {
+                Some((c, 1))
             } else {
-                let extra = if self.1.len() % self.0 == 0 { 0 } else { 1 };
-                let mid = self.1.len() / self.0 + extra;
-                let (first, next) = self.1.split_at(mid);
-                self.1 = next;
-                self.0 -= 1;
-                Some(first)
+                None
             }
-        }
-    }
-
-    _Iter(n, xs)
-}
-
-fn process_str(inp: Vec<String>) -> Vec<(char, usize)> {
-    inp.iter()
-        .flat_map(|xs| {
-            xs.to_lowercase()
-                .chars()
-                .filter_map(|c| {
-                    if c.is_alphabetic() {
-                        Some((c, 1))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<Vec<_>>()
 }
 
-pub fn frequency(input: &[&str], worker_count: usize) -> HashMap<char, usize> {
+pub fn frequency(input: &[&'static str], worker_count: usize) -> HashMap<char, usize> {
+    let len = input.len();
+    let wc = min(len, worker_count);
+
     if input.is_empty() {
         HashMap::new()
     } else {
-        let vss: Vec<Vec<String>> = split_evenly(worker_count, input)
-            .collect::<Vec<&[&str]>>()
+        let (super_tx, super_rx) = channel();
+
+        let thread_pool = (0..wc)
+            .map(|_| {
+                let super_tx = super_tx.clone();
+                let (child_tx, child_rx) = channel();
+                thread::spawn(move || {
+                    let mut p_cs: Vec<(char, usize)> = vec![];
+                    for s in child_rx {
+                        match s {
+                            Some(x) => {
+                                p_cs.append(&mut process(x));
+                            }
+                            None => {
+                                super_tx.send(p_cs).unwrap();
+                                break;
+                            }
+                        }
+                    }
+                });
+                child_tx
+            })
+            .collect::<Vec<_>>();
+
+        input
             .iter()
-            .map(|&a| a.iter().map(|&a| String::from(a)).collect())
-            .collect();
-
-        let vss_c = vss.clone();
-        let (tx, rx) = channel();
-
-        vss.into_iter().for_each(|s| {
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let cs: Vec<(char, usize)> = process_str(s);
-                tx.send(cs).unwrap();
+            .zip(thread_pool.iter().cycle())
+            .for_each(|(&s, child_tx)| {
+                child_tx.send(Some(s)).unwrap();
             });
-        });
-    
 
-    let mut r: HashMap<char, usize> = HashMap::new();
-    for _ in vss_c {
-        r = match rx.recv() {
-            Ok(v) => v.iter().fold(r, |mut acc, (c, count)| {
-                acc.entry(*c).and_modify(|x| *x += 1).or_insert(*count);
-                acc
-            }),
-            _ => r,
+        let mut r: HashMap<char, usize> = HashMap::new();
+        for child_tx in thread_pool.iter() {
+            child_tx
+                .send(None)
+                .expect("stop sending any more values to child channel");
+            r = match super_rx.recv() {
+                Ok(v) => v.iter().fold(r, |mut acc, (c, count)| {
+                    acc.entry(*c).and_modify(|x| *x += 1).or_insert(*count);
+                    acc
+                }),
+                _ => r,
+            }
         }
+        r
     }
-    r
-}
 }
